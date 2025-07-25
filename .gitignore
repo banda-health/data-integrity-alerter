@@ -1,3 +1,7 @@
+current-data.json
+.env
+*.tmp.mjs
+
 # Logs
 logs
 *.log
