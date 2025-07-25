@@ -1,0 +1,33 @@
+{
+  "name": "data-integrity-alerter",
+  "version": "1.0.0",
+  "description": "Alert the dev team when data integrity is compromised.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/banda-health/data-integrity-alerter.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/banda-health/data-integrity-alerter/issues"
+  },
+  "homepage": "https://github.com/banda-health/data-integrity-alerter#readme",
+  "devDependencies": {
+    "@types/dotenv": "^6.1.1",
+    "@types/node": "^24.1.0",
+    "@types/pg": "^8.15.4",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.1",
+    "eris": "^0.18.0",
+    "esrun": "^3.2.30",
+    "node-cron": "^4.2.1",
+    "pg": "^8.16.3"
+  }
+}
