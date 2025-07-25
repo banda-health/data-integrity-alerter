@@ -48,6 +48,15 @@ const discordBot = Eris(process.env.DISCORD_BOT_TOKEN || '', {
 	intents: ['guildMembers'],
 });
 
+// Set up the discord bot
+(async () => {
+	discordBot.on('ready', () => {
+		console.log('Listening for discord events.');
+	});
+	await discordBot.connect();
+	console.log('Discord bot is ready!');
+})();
+
 let data: { businessPartnerUUs: string[] } = { businessPartnerUUs: [] };
 try {
 	const previouslySavedData = require(previousDataFile);
@@ -192,12 +201,3 @@ process.on('uncaughtException', (err, origin) => {
 	db.end();
 	process.exit(1);
 });
-
-// Set up the discord bot
-(async () => {
-	discordBot.on('ready', () => {
-		console.log('Listening for discord events.');
-	});
-	await discordBot.connect();
-	console.log('Discord bot is ready!');
-})();
