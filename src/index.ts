@@ -71,9 +71,11 @@ const notifyOnDiscord = (data: WebhookPayload) => {
 			process.env.DISCORD_HOOK_TOKEN || '',
 			data
 		);
+		return true;
 	} catch (err) {
 		console.log(`Error while forwarding to Discord: ${err}`);
 	}
+	return false;
 };
 
 // This job runs any query(ies) and notifies Discord, if need be
@@ -121,6 +123,9 @@ const cronJob = () => {
 						'-'.repeat(maxBusinessPartnerNameLength - 16) +
 						' |';
 					let table = header;
+					data.businessPartnerUUs = [];
+					let loggedBusinessPartnerUUs: string[] = [];
+					let didLastDiscordPushFail = false;
 					for (let row of results.rows) {
 						let newRow =
 							'| ' +
@@ -133,18 +138,28 @@ const cronJob = () => {
 						// Don't forget to add 1 for the newline and 4 for the statement close
 						if (table.length + newRow.length + 1 + 4 > 2000) {
 							// Send the message to Discord
-							notifyOnDiscord({ content: table + '\n```' });
+							if (!notifyOnDiscord({ content: table + '\n```' })) {
+								didLastDiscordPushFail = true;
+								break;
+							} else {
+								data.businessPartnerUUs.push(...loggedBusinessPartnerUUs);
+								loggedBusinessPartnerUUs = [];
+							}
 							table = header + '\n' + newRow;
 						} else {
 							table += '\n' + newRow;
 						}
+						loggedBusinessPartnerUUs.push(row.c_bpartner_uu);
 					}
-					// Send the final table
-					notifyOnDiscord({ content: table + '\n```' });
+					if (!didLastDiscordPushFail) {
+						// Send the final table
+						if (notifyOnDiscord({ content: table + '\n```' })) {
+							data.businessPartnerUUs.push(...loggedBusinessPartnerUUs);
+						}
+					}
 				} else {
 					console.log('no new results returned');
 				}
-				data.businessPartnerUUs = dbBusinessPartnerUUs;
 			} else {
 				console.log('no results returned');
 				data.businessPartnerUUs = [];

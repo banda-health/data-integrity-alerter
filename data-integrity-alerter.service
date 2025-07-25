@@ -1,0 +1,14 @@
+[Unit]
+Description=data-integrity-alerter
+After=network.target
+
+[Service]
+Type=simple
+User=idempiere
+Environment=NODE_VERSION=22
+ExecStart=/home/idempiere/.nvm/nvm-exec npm run start
+WorkingDirectory=/opt/data-integrity-alerter
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target
