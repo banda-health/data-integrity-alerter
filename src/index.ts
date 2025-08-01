@@ -119,11 +119,11 @@ const cronJob = () => {
 					);
 					const maxClientNameLength = Math.max(
 						'Client'.length,
-						...results.rows.map((row) => row.client_name.length)
+						...currentBusinessPartnersToLog.map((row) => row.client_name.length)
 					);
 					const maxBusinessPartnerNameLength = Math.max(
 						'Business Partner'.length,
-						...results.rows.map((row) => row.bp_name.length)
+						...currentBusinessPartnersToLog.map((row) => row.bp_name.length)
 					);
 					const header =
 						"hey <@&907930639750266880>, these BPs don't have locations:\n```\n| Client" +
@@ -139,7 +139,7 @@ const cronJob = () => {
 					data.businessPartnerUUs = [];
 					let loggedBusinessPartnerUUs: string[] = [];
 					let didLastDiscordPushFail = false;
-					for (let row of results.rows) {
+					for (let row of currentBusinessPartnersToLog) {
 						let newRow =
 							'| ' +
 							row.client_name +
