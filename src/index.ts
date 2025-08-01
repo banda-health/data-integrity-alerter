@@ -198,6 +198,11 @@ nodeCron.schedule('*/5 * * * *', cronJob);
 
 // Clean up if the process needs to exit
 process.on('uncaughtException', (err, origin) => {
+	// Don't exit out on connection resets since the pool should handle it
+	if (err.message.includes('Connection reset by peer')) {
+		console.log('connection reset by peer, but continuing');
+		return;
+	}
 	console.log(
 		process.stderr.fd,
 		`Caught exception: ${err}\n` + `Exception origin: ${origin}\n`
