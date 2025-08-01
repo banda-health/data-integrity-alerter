@@ -19,6 +19,10 @@ const db = new pg.Pool({
 	port: parseInt(process.env.DB_PORT || '5432', 10),
 });
 
+db.on('error', (err) => {
+	console.log('pg error: ' + err);
+});
+
 const businessPartnersWithoutLocationQuery = `
 SELECT
 	bp.c_bpartner_uu,
