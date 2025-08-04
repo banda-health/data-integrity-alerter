@@ -106,8 +106,8 @@ const cronJob = () => {
 					(row) => row.c_bpartner_uu
 				);
 				// Remove ones not present in the returned data (i.e. have been fixed)
-				data.businessPartnerUUs = data.businessPartnerUUs.filter(
-					(uu) => !dbBusinessPartnerUUs.includes(uu)
+				data.businessPartnerUUs = data.businessPartnerUUs.filter((uu) =>
+					dbBusinessPartnerUUs.includes(uu)
 				);
 				// Filter out the BPs we've already logged
 				const currentBusinessPartnersToLog = results.rows.filter(
