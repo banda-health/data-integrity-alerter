@@ -105,6 +105,10 @@ const cronJob = () => {
 				const dbBusinessPartnerUUs = results.rows.map(
 					(row) => row.c_bpartner_uu
 				);
+				// Remove ones not present in the returned data (i.e. have been fixed)
+				data.businessPartnerUUs = data.businessPartnerUUs.filter(
+					(uu) => !dbBusinessPartnerUUs.includes(uu)
+				);
 				// Filter out the BPs we've already logged
 				const currentBusinessPartnersToLog = results.rows.filter(
 					(row) => !data.businessPartnerUUs.includes(row.c_bpartner_uu)
@@ -112,10 +116,6 @@ const cronJob = () => {
 				if (currentBusinessPartnersToLog.length) {
 					console.log(
 						currentBusinessPartnersToLog.length + ' new results returned'
-					);
-					// Remove ones not present in the returned data
-					data.businessPartnerUUs = data.businessPartnerUUs.filter(
-						(uu) => !dbBusinessPartnerUUs.includes(uu)
 					);
 					const maxClientNameLength = Math.max(
 						'Client'.length,
@@ -136,7 +136,6 @@ const cronJob = () => {
 						'-'.repeat(maxBusinessPartnerNameLength - 16) +
 						' |';
 					let table = header;
-					data.businessPartnerUUs = [];
 					let loggedBusinessPartnerUUs: string[] = [];
 					let didLastDiscordPushFail = false;
 					for (let row of currentBusinessPartnersToLog) {
