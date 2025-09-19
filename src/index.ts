@@ -26,12 +26,12 @@ db.on('error', (err) => {
 const businessPartnersWithoutLocationQuery = `
 SELECT
 	bp.c_bpartner_uu,
-	c.name   AS client_name,
-	bp.name  AS bp_name
+	c.name  AS client_name,
+	bp.name AS bp_name
 FROM
 	ad_client c
 		JOIN c_bpartner bp
-			ON c.ad_client_id = bp.ad_client_id
+			ON c.ad_client_id = bp.ad_client_id AND bp.created < (NOW() - '10 seconds'::interval)
 		LEFT JOIN c_bpartner_location bpl
 			ON bp.c_bpartner_id = bpl.c_bpartner_id
 		LEFT JOIN c_location l
