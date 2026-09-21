@@ -1,10 +1,72 @@
 import { config } from 'dotenv';
 import Eris, { WebhookPayload } from 'eris';
-import { writeFile } from 'fs';
+import { appendFileSync, mkdirSync, utimesSync, writeFile, writeFileSync } from 'fs';
 import nodeCron from 'node-cron';
 import pg from 'pg';
 
 const previousDataFile = './current-data.json';
+
+// INF-654: monit signalling. This service ran BROKEN for over a month -- every
+// query failing, 288 times a day -- and nothing noticed, because the only trace
+// was console output going to the journal and nobody watches a journal for an
+// absence. A `check process` would not have helped either: the process was up
+// and healthy the whole time, dutifully failing.
+//
+// So report the two things a watcher can act on:
+//   - lastSuccessFile is touched ONLY after a cycle completes end to end, and is
+//     watched for STALENESS. A run that dies anywhere leaves it untouched.
+//   - errorLogFile is appended ONLY on failure, and is watched for a CHANGED
+//     timestamp, so the first failure is reported immediately rather than after
+//     the staleness window.
+//
+// Deliberately NOT under /tmp or /var/tmp: monit on biserver runs with
+// PrivateTmp=yes, which gives it its own /tmp and /var/tmp, so a marker written
+// there is invisible to it (INF-615 hit exactly that).
+const statusDir = process.env.STATUS_DIR || '/var/log/data-integrity-alerter';
+const lastSuccessFile = `${statusDir}/last_success`;
+const errorLogFile = `${statusDir}/error.log`;
+
+// A reporting channel that cannot report is as silent as the bug it replaces, so
+// every write is guarded and says so on the console if it fails. A failure to
+// write the marker still surfaces: the marker goes stale and monit says so.
+const recordSuccess = () => {
+	try {
+		writeFileSync(lastSuccessFile, '');
+	} catch (err) {
+		console.error(`could not write ${lastSuccessFile}: ${err}`);
+	}
+};
+
+const recordFailure = (stage: string, err: unknown) => {
+	const line = `[${new Date().toISOString()}] ${stage}: ${err}\n`;
+	try {
+		appendFileSync(errorLogFile, line);
+	} catch (writeErr) {
+		console.error(`could not append to ${errorLogFile}: ${writeErr}`);
+	}
+};
+
+// Pre-create both so monit can always stat them and baseline their timestamps.
+// The success marker is backdated to the epoch when it does not exist, so its
+// staleness check fires until the first REAL success rather than reporting a
+// brand-new install as healthy.
+try {
+	mkdirSync(statusDir, { recursive: true });
+	writeFileSync(errorLogFile, '', { flag: 'a' });
+	// `wx` throws EEXIST if the marker is already there, which is what keeps the
+	// backdate below from resetting a real success on every restart.
+	writeFileSync(lastSuccessFile, '', { flag: 'wx' });
+	// ONLY reached when the marker was just created. Without this the marker
+	// carries the time of THIS startup, so a service that has never completed a
+	// single cycle looks healthy to monit until the staleness window elapses --
+	// and on a restart loop it would look healthy forever. A green check over an
+	// unverified state is the failure mode this whole marker exists to prevent.
+	utimesSync(lastSuccessFile, 0, 0);
+} catch (err) {
+	if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') {
+		console.error(`could not initialise ${statusDir}: ${err}`);
+	}
+}
 
 // Load environment variables from any .env file that exists
 config();
@@ -189,11 +251,16 @@ const cronJob = () => {
 			writeFile(previousDataFile, JSON.stringify(data), (err) => {
 				if (err) {
 					console.error('Error writing file:', err);
+					recordFailure('write ' + previousDataFile, err);
+					return;
 				}
+				// Only here: query ran, results were processed, state persisted.
+				recordSuccess();
 			});
 		})
 		.catch((exception) => {
 			console.error(exception);
+			recordFailure('DB query', exception);
 		});
 };
 
@@ -216,6 +283,7 @@ process.on('uncaughtException', (err, origin) => {
 		process.stderr.fd,
 		`Caught exception: ${err}\n` + `Exception origin: ${origin}\n`
 	);
+	recordFailure('uncaught exception', `${err} (origin: ${origin})`);
 	db.end();
 	process.exit(1);
 });
