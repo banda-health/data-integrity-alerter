@@ -17,6 +17,16 @@ const db = new pg.Pool({
 	database: process.env.DB_DATABASE,
 	password: process.env.DB_PASSWORD,
 	port: parseInt(process.env.DB_PORT || '5432', 10),
+	// iDempiere keeps its tables in the `adempiere` schema, and the role we
+	// connect as has no search_path of its own -- so it falls back to the
+	// default `"$user", public`, neither of which holds ad_client. Every query
+	// below then dies in the PARSER with 42P01 before it reaches the planner.
+	//
+	// Setting the path on the connection rather than schema-qualifying each
+	// table covers all five tables in the query below, and every query added
+	// after this one. `public` is kept on the path so anything provided by an
+	// extension still resolves.
+	options: `-c search_path=${process.env.DB_SCHEMA || 'adempiere'},public`,
 });
 
 db.on('error', (err) => {
