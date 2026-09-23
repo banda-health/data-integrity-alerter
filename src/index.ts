@@ -149,9 +149,27 @@ try {
 }
 
 // Perform the Discord notification via webhook
-const notifyOnDiscord = (data: WebhookPayload) => {
+// INF-664: this MUST await. executeWebhook returns a Promise, so the previous
+// synchronous form could not work:
+//
+//   - the try/catch could not catch a webhook failure at all. A rejection is
+//     asynchronous and escapes the block, so the catch arm was dead code -- and
+//     the rejection went on to become an unhandledRejection, reach the
+//     uncaughtException handler at the bottom of this file, and kill the
+//     process (INF-663);
+//   - `return true` fired the moment the call was DISPATCHED, so this reported
+//     success for a push that had not happened and might never succeed.
+//
+// The second half was the damaging one. Callers use this boolean to decide
+// whether to add partners to data.businessPartnerUUs -- the list of "already
+// reported" that is persisted and used to filter the next cycle. Always
+// returning true meant a partner whose push FAILED was still recorded as
+// reported, and so was never reported again. Silent, permanent loss of exactly
+// the alerts this service exists to raise, and the didLastDiscordPushFail
+// branch below was unreachable.
+const notifyOnDiscord = async (data: WebhookPayload): Promise<boolean> => {
 	try {
-		discordBot.executeWebhook(
+		await discordBot.executeWebhook(
 			process.env.DISCORD_HOOK_ID || '',
 			process.env.DISCORD_HOOK_TOKEN || '',
 			data
@@ -159,8 +177,12 @@ const notifyOnDiscord = (data: WebhookPayload) => {
 		return true;
 	} catch (err) {
 		console.log(`Error while forwarding to Discord: ${err}`);
+		// A failed push means an alert nobody received, which is this service
+		// failing at its one job -- so say so where monit is looking, rather
+		// than only on a console going to the journal.
+		recordFailure('Discord webhook', err);
+		return false;
 	}
-	return false;
 };
 
 // This job runs any query(ies) and notifies Discord, if need be
@@ -171,7 +193,7 @@ const cronJob = () => {
 		client_name: string;
 		bp_name: string;
 	}>(businessPartnersWithoutLocationQuery)
-		.then((results) => {
+		.then(async (results) => {
 			console.log('analyzing results');
 			if ((results.rowCount || 0) > 0) {
 				const dbBusinessPartnerUUs = results.rows.map(
@@ -222,7 +244,7 @@ const cronJob = () => {
 						// Don't forget to add 1 for the newline and 4 for the statement close
 						if (table.length + newRow.length + 1 + 4 > 2000) {
 							// Send the message to Discord
-							if (!notifyOnDiscord({ content: table + '\n```' })) {
+							if (!(await notifyOnDiscord({ content: table + '\n```' }))) {
 								didLastDiscordPushFail = true;
 								break;
 							} else {
@@ -237,7 +259,7 @@ const cronJob = () => {
 					}
 					if (!didLastDiscordPushFail) {
 						// Send the final table
-						if (notifyOnDiscord({ content: table + '\n```' })) {
+						if (await notifyOnDiscord({ content: table + '\n```' })) {
 							data.businessPartnerUUs.push(...loggedBusinessPartnerUUs);
 						}
 					}
