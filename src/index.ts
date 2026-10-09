@@ -95,6 +95,14 @@ db.on('error', (err) => {
 	console.log('pg error: ' + err);
 });
 
+// Vanilla iDempiere does not require a C_BPartner_Location when creating a BP
+// (MBPartner before/afterSave never inserts one). A location is only mandatory
+// when the partner is placed on an order: MOrder.setBPartner() throws
+// BPartnerNoShipToAddressException / BPartnerNoBillToAddressException if there
+// is no ship-to / bill-to. Employees created via payroll are BPs with no
+// shipping use and must not page developers. Limit the alert to active
+// customers and vendors who are not employees — the parties you would ship
+// to or receive from.
 const businessPartnersWithoutLocationQuery = `
 SELECT
 	bp.c_bpartner_uu,
@@ -113,6 +121,8 @@ FROM
 WHERE
 	c.ad_client_id > 1000000
 	AND c.isactive = 'Y'
+	AND bp.isemployee = 'N'
+	AND (bp.iscustomer = 'Y' OR bp.isvendor = 'Y')
 	AND (bpl.c_bpartner_location_id IS NULL
 		OR l.c_location_id IS NULL)
 ORDER BY
@@ -220,7 +230,7 @@ const cronJob = () => {
 						...currentBusinessPartnersToLog.map((row) => row.bp_name.length)
 					);
 					const header =
-						"hey <@&907930639750266880>, these BPs don't have locations:\n```\n| Client" +
+						"hey <@&907930639750266880>, these customer/vendor BPs don't have locations:\n```\n| Client" +
 						' '.repeat(maxClientNameLength - 6) +
 						' | Business Partner' +
 						' '.repeat(maxBusinessPartnerNameLength - 16) +
