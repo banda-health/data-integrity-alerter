@@ -103,6 +103,20 @@ db.on('error', (err) => {
 // shipping use and must not page developers. Limit the alert to active
 // customers and vendors who are not employees — the parties you would ship
 // to or receive from.
+//
+// Create-age floor (30s): GraphQL DynamicMutation commits C_BPartner before
+// C_BPartner_Location (separate Save fields). Combined with BI standby lag,
+// a sub-second successful save can look "missing" briefly; ignore brand-new BPs.
+//
+// Late-attached: first C_BPartner_Location created >30s after the BP means the
+// location was not part of the initial save (failed first attempt / retry).
+// Window of 15 minutes keeps the 5-minute cron from replaying history.
+const customerVendorBpScope = `
+	c.ad_client_id > 1000000
+	AND c.isactive = 'Y'
+	AND bp.isemployee = 'N'
+	AND (bp.iscustomer = 'Y' OR bp.isvendor = 'Y')`;
+
 const businessPartnersWithoutLocationQuery = `
 SELECT
 	bp.c_bpartner_uu,
@@ -111,7 +125,8 @@ SELECT
 FROM
 	ad_client c
 		JOIN c_bpartner bp
-			ON c.ad_client_id = bp.ad_client_id AND bp.created < (NOW() - '10 seconds'::interval)
+			ON c.ad_client_id = bp.ad_client_id
+			AND bp.created < (NOW() - '30 seconds'::interval)
 		LEFT JOIN c_bpartner_location bpl
 			ON bp.c_bpartner_id = bpl.c_bpartner_id
 		LEFT JOIN c_location l
@@ -119,14 +134,43 @@ FROM
 		JOIN c_bp_group bpg
 			ON bp.c_bp_group_id = bpg.c_bp_group_id
 WHERE
-	c.ad_client_id > 1000000
-	AND c.isactive = 'Y'
-	AND bp.isemployee = 'N'
-	AND (bp.iscustomer = 'Y' OR bp.isvendor = 'Y')
+	${customerVendorBpScope}
 	AND (bpl.c_bpartner_location_id IS NULL
 		OR l.c_location_id IS NULL)
 ORDER BY
 	bp.created DESC;`;
+
+const businessPartnersLateLocationQuery = `
+SELECT
+	bp.c_bpartner_uu,
+	c.name  AS client_name,
+	bp.name AS bp_name
+FROM
+	ad_client c
+		JOIN c_bpartner bp
+			ON c.ad_client_id = bp.ad_client_id
+		JOIN c_bpartner_location bpl
+			ON bp.c_bpartner_id = bpl.c_bpartner_id
+		JOIN c_bp_group bpg
+			ON bp.c_bp_group_id = bpg.c_bp_group_id
+WHERE
+	${customerVendorBpScope}
+GROUP BY
+	bp.c_bpartner_uu,
+	c.name,
+	bp.name,
+	bp.created
+HAVING
+	MIN(bpl.created) > bp.created + INTERVAL '30 seconds'
+	AND MIN(bpl.created) > NOW() - INTERVAL '15 minutes'
+ORDER BY
+	MIN(bpl.created) DESC;`;
+
+type BusinessPartnerAlertRow = {
+	c_bpartner_uu: string;
+	client_name: string;
+	bp_name: string;
+};
 
 // Initialize the Discord bot
 const discordBot = Eris(process.env.DISCORD_BOT_TOKEN || '', {
@@ -143,7 +187,10 @@ const discordBot = Eris(process.env.DISCORD_BOT_TOKEN || '', {
 	console.log('Discord bot is ready!');
 })();
 
-let data: { businessPartnerUUs: string[] } = { businessPartnerUUs: [] };
+let data: {
+	businessPartnerUUs: string[];
+	lateLocationBusinessPartnerUUs: string[];
+} = { businessPartnerUUs: [], lateLocationBusinessPartnerUUs: [] };
 try {
 	const previouslySavedData = require(previousDataFile);
 	if (
@@ -151,9 +198,12 @@ try {
 		previouslySavedData !== null &&
 		!Array.isArray(previouslySavedData)
 	) {
-		data = previouslySavedData;
+		data = {
+			businessPartnerUUs: previouslySavedData.businessPartnerUUs || [],
+			lateLocationBusinessPartnerUUs:
+				previouslySavedData.lateLocationBusinessPartnerUUs || [],
+		};
 	}
-	data.businessPartnerUUs ||= [];
 } catch {
 	console.log('previous data file does not exist');
 }
@@ -195,98 +245,129 @@ const notifyOnDiscord = async (data: WebhookPayload): Promise<boolean> => {
 	}
 };
 
+/** Push a Discord table for new BP rows; appends successfully sent UUs to reportedUUs. */
+const notifyNewBusinessPartners = async (
+	rows: BusinessPartnerAlertRow[],
+	reportedUUs: string[],
+	messageIntro: string,
+	logLabel: string
+): Promise<void> => {
+	const currentBusinessPartnersToLog = rows.filter(
+		(row) => !reportedUUs.includes(row.c_bpartner_uu)
+	);
+	if (!currentBusinessPartnersToLog.length) {
+		console.log(`no new ${logLabel} results returned`);
+		return;
+	}
+	console.log(
+		currentBusinessPartnersToLog.length + ` new ${logLabel} results returned`
+	);
+	const maxClientNameLength = Math.max(
+		'Client'.length,
+		...currentBusinessPartnersToLog.map((row) => row.client_name.length)
+	);
+	const maxBusinessPartnerNameLength = Math.max(
+		'Business Partner'.length,
+		...currentBusinessPartnersToLog.map((row) => row.bp_name.length)
+	);
+	const header =
+		`${messageIntro}\n\`\`\`\n| Client` +
+		' '.repeat(maxClientNameLength - 6) +
+		' | Business Partner' +
+		' '.repeat(maxBusinessPartnerNameLength - 16) +
+		' |\n| ------' +
+		'-'.repeat(maxClientNameLength - 6) +
+		' | ----------------' +
+		'-'.repeat(maxBusinessPartnerNameLength - 16) +
+		' |';
+	let table = header;
+	let loggedBusinessPartnerUUs: string[] = [];
+	let didLastDiscordPushFail = false;
+	for (const row of currentBusinessPartnersToLog) {
+		const newRow =
+			'| ' +
+			row.client_name +
+			' '.repeat(maxClientNameLength - row.client_name.length) +
+			' | ' +
+			row.bp_name +
+			' '.repeat(maxBusinessPartnerNameLength - row.bp_name.length) +
+			' |';
+		// Don't forget to add 1 for the newline and 4 for the statement close
+		if (table.length + newRow.length + 1 + 4 > 2000) {
+			if (!(await notifyOnDiscord({ content: table + '\n```' }))) {
+				didLastDiscordPushFail = true;
+				break;
+			} else {
+				reportedUUs.push(...loggedBusinessPartnerUUs);
+				loggedBusinessPartnerUUs = [];
+			}
+			table = header + '\n' + newRow;
+		} else {
+			table += '\n' + newRow;
+		}
+		loggedBusinessPartnerUUs.push(row.c_bpartner_uu);
+	}
+	if (!didLastDiscordPushFail) {
+		if (await notifyOnDiscord({ content: table + '\n```' })) {
+			reportedUUs.push(...loggedBusinessPartnerUUs);
+		}
+	}
+};
+
 // This job runs any query(ies) and notifies Discord, if need be
 const cronJob = () => {
-	console.log('running DB query');
-	db.query<{
-		c_bpartner_uu: string;
-		client_name: string;
-		bp_name: string;
-	}>(businessPartnersWithoutLocationQuery)
-		.then(async (results) => {
+	console.log('running DB queries');
+	Promise.all([
+		db.query<BusinessPartnerAlertRow>(businessPartnersWithoutLocationQuery),
+		db.query<BusinessPartnerAlertRow>(businessPartnersLateLocationQuery),
+	])
+		.then(async ([missingResults, lateResults]) => {
 			console.log('analyzing results');
-			if ((results.rowCount || 0) > 0) {
-				const dbBusinessPartnerUUs = results.rows.map(
-					(row) => row.c_bpartner_uu
+			const missingRows = missingResults.rows;
+			const lateRows = lateResults.rows;
+			const missingUUs = missingRows.map((row) => row.c_bpartner_uu);
+			const lateUUs = lateRows.map((row) => row.c_bpartner_uu);
+
+			// Drop reported UUs that no longer match their check (fixed / left window)
+			data.businessPartnerUUs = data.businessPartnerUUs.filter((uu) =>
+				missingUUs.includes(uu)
+			);
+			data.lateLocationBusinessPartnerUUs =
+				data.lateLocationBusinessPartnerUUs.filter((uu) =>
+					lateUUs.includes(uu)
 				);
-				// Remove ones not present in the returned data (i.e. have been fixed)
-				data.businessPartnerUUs = data.businessPartnerUUs.filter((uu) =>
-					dbBusinessPartnerUUs.includes(uu)
+
+			if (missingRows.length) {
+				await notifyNewBusinessPartners(
+					missingRows,
+					data.businessPartnerUUs,
+					"hey <@&907930639750266880>, these customer/vendor BPs don't have locations:",
+					'missing-location'
 				);
-				// Filter out the BPs we've already logged
-				const currentBusinessPartnersToLog = results.rows.filter(
-					(row) => !data.businessPartnerUUs.includes(row.c_bpartner_uu)
-				);
-				if (currentBusinessPartnersToLog.length) {
-					console.log(
-						currentBusinessPartnersToLog.length + ' new results returned'
-					);
-					const maxClientNameLength = Math.max(
-						'Client'.length,
-						...currentBusinessPartnersToLog.map((row) => row.client_name.length)
-					);
-					const maxBusinessPartnerNameLength = Math.max(
-						'Business Partner'.length,
-						...currentBusinessPartnersToLog.map((row) => row.bp_name.length)
-					);
-					const header =
-						"hey <@&907930639750266880>, these customer/vendor BPs don't have locations:\n```\n| Client" +
-						' '.repeat(maxClientNameLength - 6) +
-						' | Business Partner' +
-						' '.repeat(maxBusinessPartnerNameLength - 16) +
-						' |\n| ------' +
-						'-'.repeat(maxClientNameLength - 6) +
-						' | ----------------' +
-						'-'.repeat(maxBusinessPartnerNameLength - 16) +
-						' |';
-					let table = header;
-					let loggedBusinessPartnerUUs: string[] = [];
-					let didLastDiscordPushFail = false;
-					for (let row of currentBusinessPartnersToLog) {
-						let newRow =
-							'| ' +
-							row.client_name +
-							' '.repeat(maxClientNameLength - row.client_name.length) +
-							' | ' +
-							row.bp_name +
-							' '.repeat(maxBusinessPartnerNameLength - row.bp_name.length) +
-							' |';
-						// Don't forget to add 1 for the newline and 4 for the statement close
-						if (table.length + newRow.length + 1 + 4 > 2000) {
-							// Send the message to Discord
-							if (!(await notifyOnDiscord({ content: table + '\n```' }))) {
-								didLastDiscordPushFail = true;
-								break;
-							} else {
-								data.businessPartnerUUs.push(...loggedBusinessPartnerUUs);
-								loggedBusinessPartnerUUs = [];
-							}
-							table = header + '\n' + newRow;
-						} else {
-							table += '\n' + newRow;
-						}
-						loggedBusinessPartnerUUs.push(row.c_bpartner_uu);
-					}
-					if (!didLastDiscordPushFail) {
-						// Send the final table
-						if (await notifyOnDiscord({ content: table + '\n```' })) {
-							data.businessPartnerUUs.push(...loggedBusinessPartnerUUs);
-						}
-					}
-				} else {
-					console.log('no new results returned');
-				}
 			} else {
-				console.log('no results returned');
+				console.log('no missing-location results returned');
 				data.businessPartnerUUs = [];
 			}
+
+			if (lateRows.length) {
+				await notifyNewBusinessPartners(
+					lateRows,
+					data.lateLocationBusinessPartnerUUs,
+					'hey <@&907930639750266880>, these customer/vendor BPs got a location well after create (possible failed first save / retry):',
+					'late-location'
+				);
+			} else {
+				console.log('no late-location results returned');
+				data.lateLocationBusinessPartnerUUs = [];
+			}
+
 			writeFile(previousDataFile, JSON.stringify(data), (err) => {
 				if (err) {
 					console.error('Error writing file:', err);
 					recordFailure('write ' + previousDataFile, err);
 					return;
 				}
-				// Only here: query ran, results were processed, state persisted.
+				// Only here: queries ran, results were processed, state persisted.
 				recordSuccess();
 			});
 		})
